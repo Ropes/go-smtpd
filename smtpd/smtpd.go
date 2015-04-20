@@ -58,6 +58,7 @@ type Connection interface {
 
 type Envelope interface {
 	AddRecipient(rcpt MailAddress) error
+	AddData(string)
 	BeginData() error
 	Write(line []byte) error
 	Close() error
@@ -65,11 +66,20 @@ type Envelope interface {
 
 type BasicEnvelope struct {
 	rcpts []MailAddress
+	//aggregation of sent data lines
+	MsgLines []string
+	Subject  string
+	Date     time.Time
 }
 
+//TODO: POST to http://opsgenie
 func (e *BasicEnvelope) AddRecipient(rcpt MailAddress) error {
 	e.rcpts = append(e.rcpts, rcpt)
 	return nil
+}
+
+func (e *BasicEnvelope) AddData(str string) {
+	e.MsgLines = append(e.MsgLines, str)
 }
 
 func (e *BasicEnvelope) BeginData() error {
@@ -80,11 +90,32 @@ func (e *BasicEnvelope) BeginData() error {
 }
 
 func (e *BasicEnvelope) Write(line []byte) error {
-	log.Printf("Line: %q", string(line))
+	str := string(line)
+	log.Printf("Line: %q", str)
+	if start := strings.HasPrefix(str, "Subject:"); start == true {
+		re := regexp.MustCompile("^Subject: (.+)")
+		matched := re.FindStringSubmatch(str)
+		log.Printf("%q", matched)
+		e.Subject = matched[1]
+	}
+	if start := strings.HasPrefix(str, "Date:"); start == true {
+		re := regexp.MustCompile("^Date: (.+)")
+		matched := re.FindStringSubmatch(str)
+		log.Printf("Date %q", matched)
+
+		dstr := matched[1]
+		s := strings.Trim(dstr, " \n\r")
+		dt, _ := time.Parse(time.RFC1123, s)
+		e.Date = dt
+	}
 	return nil
 }
 
 func (e *BasicEnvelope) Close() error {
+	log.Printf("Subject: %s", e.Subject)
+	log.Printf("Date: %v", e.Date)
+	str := strings.Join(e.MsgLines, "")
+	log.Printf("Full message:\n%s\n", str)
 	return nil
 }
 
@@ -208,6 +239,7 @@ func (s *session) serve() {
 			continue
 		}
 
+		//wat is going on: http://en.wikipedia.org/wiki/Simple_Mail_Transfer_Protocol#SMTP_transport_example
 		switch line.Verb() {
 		case "HELO", "EHLO":
 			s.handleHello(line.Verb(), line.Arg())
@@ -227,6 +259,7 @@ func (s *session) serve() {
 				s.sendlinef("501 5.1.7 Bad sender address syntax")
 				continue
 			}
+			//Entrypoint for deciding what to do with a message
 			s.handleMailFrom(m[1])
 		case "RCPT":
 			s.handleRcpt(line)
@@ -325,6 +358,7 @@ func (s *session) handleData() {
 		return
 	}
 	s.sendlinef("354 Go ahead")
+	msgFlag := false
 	for {
 		sl, err := s.br.ReadSlice('\n')
 		if err != nil {
@@ -337,6 +371,14 @@ func (s *session) handleData() {
 		if sl[0] == '.' {
 			sl = sl[1:]
 		}
+
+		if bytes.Equal(sl, []byte("\r\n")) {
+			msgFlag = true
+		}
+		if msgFlag == true {
+			s.env.AddData(string(sl))
+		}
+
 		err = s.env.Write(sl)
 		if err != nil {
 			s.sendSMTPErrorOrLinef(err, "550 ??? failed")
