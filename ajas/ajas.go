@@ -17,6 +17,7 @@ type env struct {
 
 var ogkey *string
 var ogaccnt *string
+var addr *string
 var alertCli *ogcli.OpsGenieAlertClient
 
 func (e *env) AddRecipient(rcpt smtpd.MailAddress) error {
@@ -26,21 +27,19 @@ func (e *env) AddRecipient(rcpt smtpd.MailAddress) error {
 	return e.OGEnvelope.AddRecipient(rcpt)
 }
 
+//onNewMail Creates a new envelope struct which passes objects
 func onNewMail(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, error) {
 	log.Printf("ajas: new mail from %q", from)
-	log.Printf("OG alertCli %#v", alertCli)
 	lope := new(smtpd.OGEnvelope)
-	//lope := smtpd.OGEnvelope{AlertUser: ogaccnt}
-	//lope.AlertUser = ogaccnt
 	lope.SetClient(alertCli)
 	lope.SetUser(ogaccnt)
-	log.Printf("OG Lope\n%#v", lope)
 	return &env{lope}, nil
 }
 
 func main() {
 	ogkey = flag.String("ogkey", "YOURKEY", "OpsGenie API key for creating Alerts")
 	ogaccnt = flag.String("ogaccnt", "USER", "OpsGenie account which the client will target")
+	addr = flag.String("addr", ":2500", "Address to listen on. eg: `:2500`")
 
 	flag.Parse()
 
@@ -49,15 +48,14 @@ func main() {
 	fmt.Printf("%#v\n", cli)
 
 	aCli, cliErr := cli.Alert()
+	//Setting `alertCli` post cli.Alert() is necessary for some reason beyond me. Potentially file scope?
+	alertCli = aCli
 	if cliErr != nil {
 		panic(cliErr)
 	}
-	log.Printf("\nAlertCLI: %#v", aCli)
-	alertCli = aCli
-	fmt.Printf("%#v %s", *alertCli, *ogaccnt)
 
 	s := &smtpd.Server{
-		Addr:      ":2500",
+		Addr:      *addr,
 		OnNewMail: onNewMail,
 	}
 	err := s.ListenAndServe()

@@ -131,8 +131,6 @@ func (e *OGEnvelope) Write(line []byte) error {
 func (e *OGEnvelope) Close() error {
 
 	//Data found in envelope
-	log.Printf("Subject: %s", e.Subject)
-	log.Printf("Date: %v", e.Date)
 	str := strings.Join(e.MsgLines, "")
 	log.Printf("Full message:\n%s\n", str)
 
@@ -140,17 +138,17 @@ func (e *OGEnvelope) Close() error {
 	note := dtstr + "\n" + str
 	fmt.Println(note)
 
-	//TODO: send alert to OpsGenie
+	//Send alert to OpsGenie
 	//req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: USER, Recipients: []string{"lytics"}}
-	req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: *e.AlertUser}
-	log.Printf("->%#v<-", req)
+	req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: *e.AlertUser, Recipients: []string{*e.AlertUser}}
+	//log.Printf("->%#v<-", req)
 	response, alertErr := e.AlertClient.Create(req)
-
-	fmt.Println("alert id:", response.AlertId)
-
 	if alertErr != nil {
 		log.Printf("%v", alertErr)
+	} else {
+		fmt.Println("alert id:", response.AlertId)
 	}
+
 	return nil
 }
 
