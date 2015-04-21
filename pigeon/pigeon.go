@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	ogcli "github.com/opsgenie/opsgenie-go-sdk/client"
-	"github.com/pivotal/go-smtpd/smtpd"
+	"github.com/ropes/go-smtpd/smtpd"
 )
 
 type env struct {

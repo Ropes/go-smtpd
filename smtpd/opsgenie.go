@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/opsgenie/opsgenie-go-sdk/alerts"
 	ogcli "github.com/opsgenie/opsgenie-go-sdk/client"
+	"google.golang.org/cloud/compute/metadata"
 )
 
 // Server is an SMTP server.
@@ -155,6 +157,25 @@ func (e *OGEnvelope) Write(line []byte) error {
 	return nil
 }
 
+func (e *OGEnvelope) GetHostTags() []string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		log.Printf("Error getting hostname")
+	}
+
+	return []string{hostname}
+}
+
+func (e *OGEnvelope) GetGCETags() string {
+	tagstr, err := metadata.Get("instance/tags")
+	if err != nil {
+		log.Printf("Tags failed to be queried: %#v\n", err)
+		return ""
+	}
+	//TODO: Breakup tagstr into list of tags
+	return tagstr
+}
+
 //Final function called for an envelope
 //
 //Used to send alert to OpsGenie
@@ -162,15 +183,18 @@ func (e *OGEnvelope) Close() error {
 
 	//Data found in envelope
 	str := strings.Join(e.MsgLines, "")
-	log.Printf("Full message:\n%s\n", str)
 
 	dtstr := e.Date.Format(time.RFC3339)
-	note := dtstr + "\n" + str
+	uptime := runCmd("uptime")
+	dfh := runCmd("df -h")
+	joinList := []string{str, dtstr, uptime, dfh}
+	note := strings.Join(joinList, "\n")
+
 	fmt.Println(note)
 
 	//Send alert to OpsGenie
-	//req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: USER, Recipients: []string{"lytics"}}
-	req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: *e.AlertUser, Recipients: []string{*e.AlertUser}}
+	req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: *e.AlertUser}
+	//req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: *e.AlertUser, Recipients: []string{*e.AlertUser}}
 	//log.Printf("->%#v<-", req)
 	response, alertErr := e.AlertClient.Create(req)
 	if alertErr != nil {
@@ -180,6 +204,15 @@ func (e *OGEnvelope) Close() error {
 	}
 
 	return nil
+}
+
+func runCmd(cmd string) string {
+	out, err := exec.Command("/bin/bash", "-c", cmd).Output()
+	if err != nil {
+		fmt.Printf("Command failed: %#v\n", err)
+		return fmt.Sprintf("CMD %s run failed", cmd)
+	}
+	return string(out)
 }
 
 type ogsession struct {
