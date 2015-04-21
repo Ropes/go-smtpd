@@ -18,6 +18,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/opsgenie/opsgenie-go-sdk/alerts"
+	ogcli "github.com/opsgenie/opsgenie-go-sdk/client"
 )
 
 var (
@@ -60,38 +63,50 @@ type Envelope interface {
 	AddRecipient(rcpt MailAddress) error
 	AddData(string)
 	BeginData() error
+	SetClient(cli *ogcli.OpsGenieAlertClient)
 	Write(line []byte) error
 	Close() error
 }
 
-type BasicEnvelope struct {
+type OGEnvelope struct {
 	rcpts []MailAddress
 	//aggregation of sent data lines
-	MsgLines []string
-	Subject  string
-	Date     time.Time
+	MsgLines    []string
+	Subject     string
+	Date        time.Time
+	AlertUser   *string
+	AlertClient *ogcli.OpsGenieAlertClient
 }
 
 //TODO: POST to http://opsgenie
-func (e *BasicEnvelope) AddRecipient(rcpt MailAddress) error {
+func (e *OGEnvelope) AddRecipient(rcpt MailAddress) error {
 	e.rcpts = append(e.rcpts, rcpt)
 	return nil
 }
 
-func (e *BasicEnvelope) AddData(str string) {
+func (e *OGEnvelope) AddData(str string) {
 	e.MsgLines = append(e.MsgLines, str)
 }
 
-func (e *BasicEnvelope) BeginData() error {
+func (e *OGEnvelope) BeginData() error {
 	if len(e.rcpts) == 0 {
 		return SMTPError("554 5.5.1 Error: no valid recipients")
 	}
 	return nil
 }
 
-func (e *BasicEnvelope) Write(line []byte) error {
+func (e *OGEnvelope) SetUser(user *string) {
+	e.AlertUser = user
+}
+
+func (e *OGEnvelope) SetClient(alert *ogcli.OpsGenieAlertClient) {
+	e.AlertClient = alert
+}
+
+//Write iterates over every line the message and checks for subject and date lines for parsing
+func (e *OGEnvelope) Write(line []byte) error {
 	str := string(line)
-	log.Printf("Line: %q", str)
+
 	if start := strings.HasPrefix(str, "Subject:"); start == true {
 		re := regexp.MustCompile("^Subject: (.+)")
 		matched := re.FindStringSubmatch(str)
@@ -101,7 +116,6 @@ func (e *BasicEnvelope) Write(line []byte) error {
 	if start := strings.HasPrefix(str, "Date:"); start == true {
 		re := regexp.MustCompile("^Date: (.+)")
 		matched := re.FindStringSubmatch(str)
-		log.Printf("Date %q", matched)
 
 		dstr := matched[1]
 		s := strings.Trim(dstr, " \n\r")
@@ -111,11 +125,32 @@ func (e *BasicEnvelope) Write(line []byte) error {
 	return nil
 }
 
-func (e *BasicEnvelope) Close() error {
+//Final function called for an envelope
+//
+//Used to send alert to OpsGenie
+func (e *OGEnvelope) Close() error {
+
+	//Data found in envelope
 	log.Printf("Subject: %s", e.Subject)
 	log.Printf("Date: %v", e.Date)
 	str := strings.Join(e.MsgLines, "")
 	log.Printf("Full message:\n%s\n", str)
+
+	dtstr := e.Date.Format(time.RFC3339)
+	note := dtstr + "\n" + str
+	fmt.Println(note)
+
+	//TODO: send alert to OpsGenie
+	//req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: USER, Recipients: []string{"lytics"}}
+	req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: *e.AlertUser}
+	log.Printf("->%#v<-", req)
+	response, alertErr := e.AlertClient.Create(req)
+
+	fmt.Println("alert id:", response.AlertId)
+
+	if alertErr != nil {
+		log.Printf("%v", alertErr)
+	}
 	return nil
 }
 
