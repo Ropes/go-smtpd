@@ -1,15 +1,8 @@
-// Package smtpd implements an SMTP server. Hooks are provided to customize
-// its behavior.
 package smtpd
-
-// TODO:
-//  -- send 421 to connected clients on graceful server shutdown (s3.8)
-//
 
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -17,17 +10,13 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
-)
 
-var (
-	rcptToRE = regexp.MustCompile(`[Tt][Oo]:\s*<(.+)>`)
-	//mailFromRE = regexp.MustCompile(`(?i)^from:\s*<(.*?)>`)
-	mailFromRE = regexp.MustCompile(`[Ff][Rr][Oo][Mm]:\s*<(.*)>`)
+	"github.com/opsgenie/opsgenie-go-sdk/alerts"
+	ogcli "github.com/opsgenie/opsgenie-go-sdk/client"
 )
 
 // Server is an SMTP server.
-type Server struct {
+type OGServer struct {
 	Addr         string        // TCP address to listen on, ":25" if empty
 	Hostname     string        // optional Hostname to announce; "" to use system hostname
 	ReadTimeout  time.Duration // optional read timeout
@@ -41,54 +30,10 @@ type Server struct {
 
 	// OnNewMail must be defined and is called when a new message beings.
 	// (when a MAIL FROM line arrives)
-	OnNewMail func(c Connection, from MailAddress) (Envelope, error)
+	OnNewMail func(c Connection, from MailAddress) (OGEnvelopeInterface, error)
 }
 
-// MailAddress is defined by
-type MailAddress interface {
-	Email() string    // email address, as provided
-	Hostname() string // canonical hostname, lowercase
-}
-
-// Connection is implemented by the SMTP library and provided to callers
-// customizing their own Servers.
-type Connection interface {
-	Addr() net.Addr
-}
-
-type Envelope interface {
-	AddRecipient(rcpt MailAddress) error
-	BeginData() error
-	Write(line []byte) error
-	Close() error
-}
-
-type BasicEnvelope struct {
-	rcpts []MailAddress
-}
-
-func (e *BasicEnvelope) AddRecipient(rcpt MailAddress) error {
-	e.rcpts = append(e.rcpts, rcpt)
-	return nil
-}
-
-func (e *BasicEnvelope) BeginData() error {
-	if len(e.rcpts) == 0 {
-		return SMTPError("554 5.5.1 Error: no valid recipients")
-	}
-	return nil
-}
-
-func (e *BasicEnvelope) Write(line []byte) error {
-	log.Printf("Line: %q", string(line))
-	return nil
-}
-
-func (e *BasicEnvelope) Close() error {
-	return nil
-}
-
-func (srv *Server) hostname() string {
+func (srv *OGServer) hostname() string {
 	if srv.Hostname != "" {
 		return srv.Hostname
 	}
@@ -102,7 +47,7 @@ func (srv *Server) hostname() string {
 // ListenAndServe listens on the TCP network address srv.Addr and then
 // calls Serve to handle requests on incoming connections.  If
 // srv.Addr is blank, ":25" is used.
-func (srv *Server) ListenAndServe() error {
+func (srv *OGServer) ListenAndServe() error {
 	addr := srv.Addr
 	if addr == "" {
 		addr = ":25"
@@ -114,7 +59,7 @@ func (srv *Server) ListenAndServe() error {
 	return srv.Serve(ln)
 }
 
-func (srv *Server) Serve(ln net.Listener) error {
+func (srv *OGServer) Serve(ln net.Listener) error {
 	defer ln.Close()
 	for {
 		rw, e := ln.Accept()
@@ -134,20 +79,8 @@ func (srv *Server) Serve(ln net.Listener) error {
 	panic("not reached")
 }
 
-type session struct {
-	srv *Server
-	rwc net.Conn
-	br  *bufio.Reader
-	bw  *bufio.Writer
-
-	env Envelope // current envelope, or nil
-
-	helloType string
-	helloHost string
-}
-
-func (srv *Server) newSession(rwc net.Conn) (s *session, err error) {
-	s = &session{
+func (srv *OGServer) newSession(rwc net.Conn) (s *ogsession, err error) {
+	s = &ogsession{
 		srv: srv,
 		rwc: rwc,
 		br:  bufio.NewReader(rwc),
@@ -156,11 +89,116 @@ func (srv *Server) newSession(rwc net.Conn) (s *session, err error) {
 	return
 }
 
-func (s *session) errorf(format string, args ...interface{}) {
+type OGEnvelopeInterface interface {
+	AddRecipient(rcpt MailAddress) error
+	AddData(string)
+	BeginData() error
+	SetClient(cli *ogcli.OpsGenieAlertClient)
+	Write(line []byte) error
+	Close() error
+}
+
+type OGEnvelope struct {
+	rcpts []MailAddress
+	//aggregation of sent data lines
+	MsgLines    []string
+	Subject     string
+	Date        time.Time
+	AlertUser   *string
+	AlertClient *ogcli.OpsGenieAlertClient
+}
+
+//TODO: POST to http://opsgenie
+func (e *OGEnvelope) AddRecipient(rcpt MailAddress) error {
+	e.rcpts = append(e.rcpts, rcpt)
+	return nil
+}
+
+func (e *OGEnvelope) AddData(str string) {
+	e.MsgLines = append(e.MsgLines, str)
+}
+
+func (e *OGEnvelope) BeginData() error {
+	if len(e.rcpts) == 0 {
+		return SMTPError("554 5.5.1 Error: no valid recipients")
+	}
+	return nil
+}
+
+func (e *OGEnvelope) SetUser(user *string) {
+	e.AlertUser = user
+}
+
+func (e *OGEnvelope) SetClient(alert *ogcli.OpsGenieAlertClient) {
+	e.AlertClient = alert
+}
+
+//Write iterates over every line the message and checks for subject and date lines for parsing
+func (e *OGEnvelope) Write(line []byte) error {
+	str := string(line)
+
+	if start := strings.HasPrefix(str, "Subject:"); start == true {
+		re := regexp.MustCompile("^Subject: (.+)")
+		matched := re.FindStringSubmatch(str)
+		log.Printf("%q", matched)
+		e.Subject = matched[1]
+	}
+	if start := strings.HasPrefix(str, "Date:"); start == true {
+		re := regexp.MustCompile("^Date: (.+)")
+		matched := re.FindStringSubmatch(str)
+
+		dstr := matched[1]
+		s := strings.Trim(dstr, " \n\r")
+		dt, _ := time.Parse(time.RFC1123, s)
+		e.Date = dt
+	}
+	return nil
+}
+
+//Final function called for an envelope
+//
+//Used to send alert to OpsGenie
+func (e *OGEnvelope) Close() error {
+
+	//Data found in envelope
+	str := strings.Join(e.MsgLines, "")
+	log.Printf("Full message:\n%s\n", str)
+
+	dtstr := e.Date.Format(time.RFC3339)
+	note := dtstr + "\n" + str
+	fmt.Println(note)
+
+	//Send alert to OpsGenie
+	//req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: USER, Recipients: []string{"lytics"}}
+	req := alerts.CreateAlertRequest{Message: e.Subject, Note: note, User: *e.AlertUser, Recipients: []string{*e.AlertUser}}
+	//log.Printf("->%#v<-", req)
+	response, alertErr := e.AlertClient.Create(req)
+	if alertErr != nil {
+		log.Printf("%v", alertErr)
+	} else {
+		fmt.Println("alert id:", response.AlertId)
+	}
+
+	return nil
+}
+
+type ogsession struct {
+	srv *OGServer
+	rwc net.Conn
+	br  *bufio.Reader
+	bw  *bufio.Writer
+
+	env OGEnvelopeInterface // current envelope, or nil
+
+	helloType string
+	helloHost string
+}
+
+func (s *ogsession) errorf(format string, args ...interface{}) {
 	log.Printf("Client error: "+format, args...)
 }
 
-func (s *session) sendf(format string, args ...interface{}) {
+func (s *ogsession) sendf(format string, args ...interface{}) {
 	if s.srv.WriteTimeout != 0 {
 		s.rwc.SetWriteDeadline(time.Now().Add(s.srv.WriteTimeout))
 	}
@@ -168,11 +206,11 @@ func (s *session) sendf(format string, args ...interface{}) {
 	s.bw.Flush()
 }
 
-func (s *session) sendlinef(format string, args ...interface{}) {
+func (s *ogsession) sendlinef(format string, args ...interface{}) {
 	s.sendf(format+"\r\n", args...)
 }
 
-func (s *session) sendSMTPErrorOrLinef(err error, format string, args ...interface{}) {
+func (s *ogsession) sendSMTPErrorOrLinef(err error, format string, args ...interface{}) {
 	if se, ok := err.(SMTPError); ok {
 		s.sendlinef("%s", se.Error())
 		return
@@ -180,11 +218,11 @@ func (s *session) sendSMTPErrorOrLinef(err error, format string, args ...interfa
 	s.sendlinef(format, args...)
 }
 
-func (s *session) Addr() net.Addr {
+func (s *ogsession) Addr() net.Addr {
 	return s.rwc.RemoteAddr()
 }
 
-func (s *session) serve() {
+func (s *ogsession) serve() {
 	defer s.rwc.Close()
 	if onc := s.srv.OnNewConnection; onc != nil {
 		if err := onc(s); err != nil {
@@ -239,7 +277,7 @@ func (s *session) serve() {
 	}
 }
 
-func (s *session) handleHello(greeting, host string) {
+func (s *ogsession) handleHello(greeting, host string) {
 	s.helloType = greeting
 	s.helloHost = host
 	fmt.Fprintf(s.bw, "250-%s\r\n", s.srv.hostname())
@@ -258,7 +296,7 @@ func (s *session) handleHello(greeting, host string) {
 	s.bw.Flush()
 }
 
-func (s *session) handleMailFrom(email string) {
+func (s *ogsession) handleMailFrom(email string) {
 	// TODO: 4.1.1.11.  If the server SMTP does not recognize or
 	// cannot implement one or more of the parameters associated
 	// qwith a particular MAIL FROM or RCPT TO command, it will return
@@ -290,7 +328,7 @@ func (s *session) handleMailFrom(email string) {
 	s.sendlinef("250 2.1.0 Ok")
 }
 
-func (s *session) handleRcpt(line cmdLine) {
+func (s *ogsession) handleRcpt(line cmdLine) {
 	// TODO: 4.1.1.11.  If the server SMTP does not recognize or
 	// cannot implement one or more of the parameters associated
 	// qwith a particular MAIL FROM or RCPT TO command, it will return
@@ -315,7 +353,7 @@ func (s *session) handleRcpt(line cmdLine) {
 	s.sendlinef("250 2.1.0 Ok")
 }
 
-func (s *session) handleData() {
+func (s *ogsession) handleData() {
 	if s.env == nil {
 		s.sendlinef("503 5.5.1 Error: need RCPT command")
 		return
@@ -348,68 +386,11 @@ func (s *session) handleData() {
 	s.env = nil
 }
 
-func (s *session) handleError(err error) {
+func (s *ogsession) handleError(err error) {
 	if se, ok := err.(SMTPError); ok {
 		s.sendlinef("%s", se)
 		return
 	}
 	log.Printf("Error: %s", err)
 	s.env = nil
-}
-
-type addrString string
-
-func (a addrString) Email() string {
-	return string(a)
-}
-
-func (a addrString) Hostname() string {
-	e := string(a)
-	if idx := strings.Index(e, "@"); idx != -1 {
-		return strings.ToLower(e[idx+1:])
-	}
-	return ""
-}
-
-type cmdLine string
-
-func (cl cmdLine) checkValid() error {
-	if !strings.HasSuffix(string(cl), "\r\n") {
-		return errors.New(`line doesn't end in \r\n`)
-	}
-	// Check for verbs defined not to have an argument
-	// (RFC 5321 s4.1.1)
-	switch cl.Verb() {
-	case "RSET", "DATA", "QUIT":
-		if cl.Arg() != "" {
-			return errors.New("unexpected argument")
-		}
-	}
-	return nil
-}
-
-func (cl cmdLine) Verb() string {
-	s := string(cl)
-	if idx := strings.Index(s, " "); idx != -1 {
-		return strings.ToUpper(s[:idx])
-	}
-	return strings.ToUpper(s[:len(s)-2])
-}
-
-func (cl cmdLine) Arg() string {
-	s := string(cl)
-	if idx := strings.Index(s, " "); idx != -1 {
-		return strings.TrimRightFunc(s[idx+1:len(s)-2], unicode.IsSpace)
-	}
-	return ""
-}
-
-func (cl cmdLine) String() string {
-	return string(cl)
-}
-
-type SMTPError string
-
-func (e SMTPError) Error() string {
-	return string(e)
 }

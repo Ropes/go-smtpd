@@ -28,7 +28,7 @@ func (e *env) AddRecipient(rcpt smtpd.MailAddress) error {
 }
 
 //onNewMail Creates a new envelope struct which passes objects
-func onNewMail(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, error) {
+func onNewMail(c smtpd.Connection, from smtpd.MailAddress) (smtpd.OGEnvelopeInterface, error) {
 	log.Printf("ajas: new mail from %q", from)
 	lope := new(smtpd.OGEnvelope)
 	lope.SetClient(alertCli)
@@ -54,7 +54,7 @@ func main() {
 		panic(cliErr)
 	}
 
-	s := &smtpd.Server{
+	s := &smtpd.OGServer{
 		Addr:      *addr,
 		OnNewMail: onNewMail,
 	}
