@@ -28,12 +28,13 @@ func (e *env) AddRecipient(rcpt smtpd.MailAddress) error {
 
 func onNewMail(c smtpd.Connection, from smtpd.MailAddress) (smtpd.Envelope, error) {
 	log.Printf("ajas: new mail from %q", from)
+	log.Printf("OG alertCli %#v", alertCli)
 	lope := new(smtpd.OGEnvelope)
 	//lope := smtpd.OGEnvelope{AlertUser: ogaccnt}
-	lope.AlertUser = ogaccnt
+	//lope.AlertUser = ogaccnt
 	lope.SetClient(alertCli)
 	lope.SetUser(ogaccnt)
-	log.Printf("%#v", lope)
+	log.Printf("OG Lope\n%#v", lope)
 	return &env{lope}, nil
 }
 
@@ -45,12 +46,14 @@ func main() {
 
 	cli := new(ogcli.OpsGenieClient)
 	cli.SetApiKey(*ogkey)
-	fmt.Printf("%#v", cli)
+	fmt.Printf("%#v\n", cli)
 
-	alertCli, cliErr := cli.Alert()
+	aCli, cliErr := cli.Alert()
 	if cliErr != nil {
 		panic(cliErr)
 	}
+	log.Printf("\nAlertCLI: %#v", aCli)
+	alertCli = aCli
 	fmt.Printf("%#v %s", *alertCli, *ogaccnt)
 
 	s := &smtpd.Server{
